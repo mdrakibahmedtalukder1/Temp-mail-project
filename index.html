@@ -121,17 +121,17 @@
     <!-- Footer -->
     <footer class="bg-white border-t py-6 mt-auto">
         <div class="text-center text-gray-500 text-sm">
-            Powered by 1secmail API • Built for Free on GitHub Pages
+            Powered by Mail.tm API • Built for Free on GitHub Pages
         </div>
     </footer>
 
     <script>
         // Global State
         let currentEmail = "";
-        let currentUsername = "";
-        let currentDomain = "";
+        let currentToken = ""; // Mail.tm uses secure JWT tokens instead of usernames
         let pollingInterval = null;
-        let loadedMessages = new Set(); // Keep track of loaded message IDs
+        let loadedMessages = new Set();
+        let consecutiveErrors = 0;
 
         // DOM Elements
         const emailInput = document.getElementById('emailAddress');
@@ -141,220 +141,216 @@
         const messageCount = document.getElementById('messageCount');
         const messageViewer = document.getElementById('messageViewer');
         const generateBtn = document.getElementById('generateBtn');
-
         const customUsernameInput = document.getElementById('customUsername');
         const domainSelect = document.getElementById('domainSelect');
 
-        // --- NEW ROBUST BYPASS FUNCTION ---
-        // This function routes requests through multiple proxies to bypass Adblockers securely.
-        // If one proxy is down or fails, it automatically falls back to the next one.
-        async function fetchWithProxy(apiUrl) {
-            const proxies = [
-                `https://api.codetabs.com/v1/proxy?quest=`,
-                `https://api.allorigins.win/raw?url=`
-            ];
+        const API_BASE = 'https://api.mail.tm';
 
-            let lastError;
-            
-            // Try all proxies in sequence
-            for (const proxy of proxies) {
-                try {
-                    const response = await fetch(`${proxy}${encodeURIComponent(apiUrl)}`);
-                    if (response.ok) {
-                        return await response.json();
-                    }
-                } catch (e) {
-                    lastError = e;
-                    console.warn(`Proxy ${proxy} failed, trying next...`);
-                }
-            }
-
-            // Final fallback: try direct connection just in case shields are actually off
-            try {
-                const response = await fetch(apiUrl);
-                if (response.ok) {
-                    return await response.json();
-                }
-            } catch (e) {
-                console.error("Direct connection also failed.");
-            }
-
-            throw lastError || new Error('All proxies and direct connection failed.');
-        }
-
-        // Fetch available domains on load
+        // 1. Fetch available domains natively (No proxy needed!)
         async function loadDomains() {
             try {
-                const domains = await fetchWithProxy('https://www.1secmail.com/api/v1/?action=getDomainList');
-                if (domains && Array.isArray(domains) && domains.length > 0) {
+                const response = await fetch(`${API_BASE}/domains?page=1`);
+                const data = await response.json();
+                if (data['hydra:member']) {
+                    const domains = data['hydra:member'].map(d => d.domain);
                     domainSelect.innerHTML = domains.map(d => `<option value="${d}">${d}</option>`).join('');
-                } else {
-                    throw new Error("Invalid domain data received");
                 }
-            } catch(e) {
-                console.error("Failed to load domains dynamically:", e);
-                // Hardcoded fallback domains to ensure the UI doesn't break if the proxy fails on load
-                const defaultDomains = ["1secmail.com", "1secmail.org", "1secmail.net", "kzccv.com", "qiott.com", "wuuvo.com", "icznn.com"];
-                domainSelect.innerHTML = defaultDomains.map(d => `<option value="${d}">${d}</option>`).join('');
+            } catch (error) {
+                console.error("Failed to load domains", error);
+                domainSelect.innerHTML = '<option value="">Network Error</option>';
             }
         }
         
-        // Start initialization
         loadDomains();
 
-        // Setup custom email
-        function setCustomEmail() {
-            // Clean up the username so it only contains valid characters
-            const username = customUsernameInput.value.trim().toLowerCase().replace(/[^a-z0-9.]/g, '');
-            if(!username) {
-                customUsernameInput.focus();
-                return;
+        // 2. Helper to Register and Login to Mail.tm
+        async function registerAndLogin(address) {
+            const password = Math.random().toString(36).slice(-10) + "A1!"; // Secure random password
+            
+            // Register Account
+            const regRes = await fetch(`${API_BASE}/accounts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ address, password })
+            });
+
+            if (!regRes.ok) {
+                if (regRes.status === 422) throw new Error("Username already taken!");
+                throw new Error("Failed to create account");
             }
-            
-            currentUsername = username;
-            currentDomain = domainSelect.value;
-            currentEmail = `${currentUsername}@${currentDomain}`;
-            
-            // Update UI
+
+            // Login to get JWT Token
+            const tokenRes = await fetch(`${API_BASE}/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ address, password })
+            });
+
+            if (!tokenRes.ok) throw new Error("Failed to authenticate");
+
+            const tokenData = await tokenRes.json();
+            currentToken = tokenData.token;
+            currentEmail = address;
+            consecutiveErrors = 0;
+        }
+
+        // 3. UI Reset Helper
+        function resetUIForNewEmail() {
             emailInput.value = currentEmail;
             copyBtn.classList.remove('hidden');
             statusIndicator.classList.remove('hidden');
-            
-            // Reset inbox
+            statusIndicator.innerHTML = `
+                <span class="relative flex h-3 w-3">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                </span>
+                Waiting for incoming emails... (Auto-refreshing)`;
             messageList.innerHTML = `<li class="p-6 text-center text-gray-400 text-sm">Waiting for new emails...</li>`;
             messageViewer.innerHTML = `<div class="text-center text-gray-400">Select an email to read</div>`;
             messageCount.innerText = "0";
             loadedMessages.clear();
 
-            // Start polling
             if (pollingInterval) clearInterval(pollingInterval);
             checkInbox(); // check immediately once
             pollingInterval = setInterval(checkInbox, 5000);
-            
-            // Clear input
-            customUsernameInput.value = '';
         }
 
-        // 1. Generate a new email address
+        // 4. Generate Random Email
         async function generateNewEmail() {
             try {
-                // Show loading state
                 generateBtn.innerText = "Generating...";
                 generateBtn.disabled = true;
-                emailInput.value = "Connecting securely..."; // Visual feedback
+                emailInput.value = "Creating secure inbox...";
 
-                // Use our new proxy function instead of direct fetch
-                const data = await fetchWithProxy('https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1');
+                const domain = domainSelect.value;
+                if (!domain) throw new Error("Domains not loaded yet");
                 
-                // Update state
-                currentEmail = data[0];
-                const parts = currentEmail.split('@');
-                currentUsername = parts[0];
-                currentDomain = parts[1];
-
-                // Update UI
-                emailInput.value = currentEmail;
-                copyBtn.classList.remove('hidden');
-                statusIndicator.classList.remove('hidden');
+                const randomName = Math.random().toString(36).slice(-8);
+                await registerAndLogin(`${randomName}@${domain}`);
                 
-                // Reset inbox
-                messageList.innerHTML = `<li class="p-6 text-center text-gray-400 text-sm">Waiting for new emails...</li>`;
-                messageViewer.innerHTML = `<div class="text-center text-gray-400">Select an email to read</div>`;
-                messageCount.innerText = "0";
-                loadedMessages.clear();
-
-                // Start polling for new emails every 5 seconds
-                if (pollingInterval) clearInterval(pollingInterval);
-                pollingInterval = setInterval(checkInbox, 5000);
+                resetUIForNewEmail();
 
             } catch (error) {
-                console.error("API Connection Error:", error);
-                
-                // Graceful UI error handling (Now rare due to robust proxy list)
+                console.error("Connection Error:", error);
                 emailInput.value = "Connection Failed";
-                statusIndicator.classList.add('hidden');
-                copyBtn.classList.add('hidden');
-                
-                messageViewer.innerHTML = `
-                    <div class="text-center p-6 bg-red-50 rounded-xl border border-red-200 m-4">
-                        <svg class="w-12 h-12 text-red-500 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                        <h3 class="text-lg font-bold text-red-700 mb-2">API Connection Blocked</h3>
-                        <p class="text-sm text-red-600 mb-2">Your browser failed to connect to the temporary mail server.</p>
-                        <p class="text-sm text-gray-700 font-medium">If you are using an <strong>Adblocker</strong> (like uBlock Origin) or a privacy browser (like <strong>Brave</strong>), please disable shields for this site and click Generate again.</p>
-                    </div>
-                `;
+                messageViewer.innerHTML = `<div class="text-center text-red-500 p-6 font-bold">Error: ${error.message}</div>`;
             } finally {
                 generateBtn.innerText = "Generate New";
                 generateBtn.disabled = false;
             }
         }
 
-        // 2. Poll the API for new messages
-        async function checkInbox() {
-            if (!currentUsername || !currentDomain) return;
+        // 5. Custom Email Handler
+        async function setCustomEmail() {
+            const username = customUsernameInput.value.trim().toLowerCase().replace(/[^a-z0-9.]/g, '');
+            if(!username) return;
+            
+            const domain = domainSelect.value;
+            const address = `${username}@${domain}`;
+            
+            const customBtn = document.querySelector('button[onclick="setCustomEmail()"]');
+            const originalText = customBtn.innerText;
+            
+            customBtn.innerText = "Checking...";
+            customBtn.disabled = true;
 
             try {
-                // Use proxy to check inbox securely
-                const messages = await fetchWithProxy(`https://www.1secmail.com/api/v1/?action=getMessages&login=${currentUsername}&domain=${currentDomain}`);
-
-                // Update count
-                messageCount.innerText = messages.length;
-
-                if (messages.length > 0) {
-                    // Only update UI if there are new messages
-                    if(messages.length !== loadedMessages.size) {
-                        messageList.innerHTML = ''; // clear waiting text
-                        
-                        messages.forEach(msg => {
-                            loadedMessages.add(msg.id);
-                            
-                            // Create list item for each email
-                            const li = document.createElement('li');
-                            li.className = "p-4 hover:bg-blue-50 cursor-pointer transition-colors border-l-4 border-transparent hover:border-blue-500";
-                            li.onclick = () => readMessage(msg.id, li);
-                            
-                            // Formatting date
-                            const date = new Date(msg.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-
-                            li.innerHTML = `
-                                <div class="flex justify-between items-baseline mb-1">
-                                    <h4 class="text-sm font-bold text-gray-900 truncate pr-2">${msg.from}</h4>
-                                    <span class="text-xs text-gray-500 flex-shrink-0">${date}</span>
-                                </div>
-                                <p class="text-sm text-gray-600 truncate">${msg.subject || "(No Subject)"}</p>
-                            `;
-                            messageList.appendChild(li);
-                        });
-                    }
-                }
+                await registerAndLogin(address);
+                resetUIForNewEmail();
+                customUsernameInput.value = '';
+                customBtn.innerText = originalText;
+                customBtn.disabled = false;
             } catch (error) {
-                console.error("Error fetching messages:", error);
+                // If name is taken, show a red warning on the button!
+                customBtn.innerText = "Name Taken!";
+                customBtn.classList.replace('bg-blue-600', 'bg-red-500');
+                
+                setTimeout(() => {
+                    customBtn.innerText = originalText;
+                    customBtn.classList.replace('bg-red-500', 'bg-blue-600');
+                    customBtn.disabled = false;
+                }, 3000);
             }
         }
 
-        // 3. Fetch and display the specific email content
+        // 6. Check Inbox
+        async function checkInbox() {
+            if (!currentToken) return;
+
+            try {
+                const res = await fetch(`${API_BASE}/messages`, {
+                    headers: { 'Authorization': `Bearer ${currentToken}` }
+                });
+                
+                if (!res.ok) throw new Error("Auth error");
+                
+                const data = await res.json();
+                const messages = data['hydra:member'];
+                consecutiveErrors = 0;
+
+                messageCount.innerText = messages.length;
+
+                if (messages.length > 0 && messages.length !== loadedMessages.size) {
+                    messageList.innerHTML = ''; // clear waiting text
+                    
+                    messages.forEach(msg => {
+                        loadedMessages.add(msg.id);
+                        
+                        const li = document.createElement('li');
+                        li.className = "p-4 hover:bg-blue-50 cursor-pointer transition-colors border-l-4 border-transparent hover:border-blue-500";
+                        li.onclick = () => readMessage(msg.id, li);
+                        
+                        const date = new Date(msg.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        const senderName = msg.from.name || msg.from.address;
+
+                        li.innerHTML = `
+                            <div class="flex justify-between items-baseline mb-1">
+                                <h4 class="text-sm font-bold text-gray-900 truncate pr-2">${senderName}</h4>
+                                <span class="text-xs text-gray-500 flex-shrink-0">${date}</span>
+                            </div>
+                            <p class="text-sm text-gray-600 truncate">${msg.subject || "(No Subject)"}</p>
+                        `;
+                        messageList.appendChild(li);
+                    });
+                }
+            } catch (error) {
+                consecutiveErrors++;
+                if (consecutiveErrors >= 3) {
+                    clearInterval(pollingInterval);
+                    statusIndicator.innerHTML = '<span class="text-red-500 font-bold">Connection lost. Check internet.</span>';
+                }
+            }
+        }
+
+        // 7. Read Specific Message
         async function readMessage(messageId, listItemElement) {
             try {
-                // Highlight selected item
                 document.querySelectorAll('#messageList li').forEach(el => el.classList.remove('bg-blue-50', 'border-blue-500'));
                 listItemElement.classList.add('bg-blue-50', 'border-blue-500');
 
-                // Show loading in viewer
-                messageViewer.innerHTML = `<div class="text-center text-gray-500"><span class="animate-pulse">Loading message...</span></div>`;
+                messageViewer.innerHTML = `<div class="text-center text-gray-500"><span class="animate-pulse">Loading secure message...</span></div>`;
 
-                // Use proxy to read email securely
-                const msg = await fetchWithProxy(`https://www.1secmail.com/api/v1/?action=readMessage&login=${currentUsername}&domain=${currentDomain}&id=${messageId}`);
+                const res = await fetch(`${API_BASE}/messages/${messageId}`, {
+                    headers: { 'Authorization': `Bearer ${currentToken}` }
+                });
+                const msg = await res.json();
 
-                // Render email content (Prefer HTML, fallback to text)
-                const content = msg.htmlBody ? msg.htmlBody : `<pre class="whitespace-pre-wrap font-sans">${msg.textBody || "Empty message"}</pre>`;
+                let content = "No content available.";
+                if (msg.html && msg.html.length > 0) {
+                    content = msg.html[0]; // Mail.tm supplies HTML as an array
+                } else if (msg.text) {
+                    content = `<pre class="whitespace-pre-wrap font-sans">${msg.text}</pre>`;
+                }
+
+                const senderFull = msg.from.name ? `${msg.from.name} &lt;${msg.from.address}&gt;` : msg.from.address;
 
                 messageViewer.innerHTML = `
                     <div class="w-full flex flex-col h-full bg-white text-left">
                         <div class="mb-6 pb-4 border-b">
                             <h2 class="text-xl font-bold text-gray-800 mb-2">${msg.subject || "(No Subject)"}</h2>
                             <div class="flex flex-col text-sm text-gray-600">
-                                <span><strong>From:</strong> ${msg.from}</span>
-                                <span><strong>Date:</strong> ${new Date(msg.date).toLocaleString()}</span>
+                                <span><strong>From:</strong> ${senderFull}</span>
+                                <span><strong>Date:</strong> ${new Date(msg.createdAt).toLocaleString()}</span>
                             </div>
                         </div>
                         <div class="overflow-y-auto flex-grow text-gray-800 email-content">
@@ -363,27 +359,22 @@
                     </div>
                 `;
             } catch (error) {
-                messageViewer.innerHTML = `<div class="text-red-500">Error loading message.</div>`;
-                console.error(error);
+                messageViewer.innerHTML = `<div class="text-red-500">Error decrypting message.</div>`;
             }
         }
 
-        // 4. Copy Email to Clipboard
+        // 8. Copy Clipboard
         function copyEmail() {
             if (!currentEmail) return;
-            
-            // Modern clipboard API fallback
             navigator.clipboard.writeText(currentEmail).then(() => {
                 const originalText = copyBtn.innerText;
                 copyBtn.innerText = "Copied!";
                 copyBtn.classList.add('bg-green-100', 'text-green-700');
-                
                 setTimeout(() => {
                     copyBtn.innerText = originalText;
                     copyBtn.classList.remove('bg-green-100', 'text-green-700');
                 }, 2000);
             }).catch(err => {
-                // Fallback for older browsers / iframe restrictions
                 const textArea = document.createElement("textarea");
                 textArea.value = currentEmail;
                 document.body.appendChild(textArea);
