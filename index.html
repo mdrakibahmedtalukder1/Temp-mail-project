@@ -74,11 +74,13 @@
         
         <!-- Premium Header Section -->
         <div class="text-center mb-8 md:mb-12">
-            <!-- Neon Live Counter (Updated: Removed dot, text only) -->
-            <div class="inline-flex items-center px-6 py-2 rounded-full bg-slate-900 border border-cyan-400/40 shadow-[0_0_20px_-3px_rgba(34,211,238,0.5)] backdrop-blur-md mb-6 relative overflow-hidden">
-                <div class="absolute inset-0 bg-gradient-to-r from-cyan-500/10 to-blue-500/10 animate-pulse"></div>
+            <!-- Neon Live Counter -->
+            <div class="inline-flex items-center px-6 py-2.5 rounded-full bg-slate-900 border border-cyan-400/40 shadow-[0_0_20px_-3px_rgba(34,211,238,0.5)] backdrop-blur-md mb-6 relative overflow-hidden">
+                <div class="absolute inset-0 bg-gradient-to-r from-cyan-500/20 to-blue-500/20 animate-pulse"></div>
                 <span class="text-xs font-bold uppercase tracking-widest text-cyan-300 relative z-10 drop-shadow-[0_0_2px_rgba(34,211,238,0.8)] flex items-center">
-                    Now Generating For <span id="liveCounter" class="text-white font-mono text-sm ml-1.5 drop-shadow-[0_0_4px_rgba(255,255,255,0.8)] transition-all">14,285</span><span class="text-white ml-0.5">+</span>
+                    Now Generating For 
+                    <span id="liveCounter" class="text-white font-mono text-sm ml-2 drop-shadow-[0_0_4px_rgba(255,255,255,0.8)] transition-all duration-150 inline-block w-[60px] text-right">14,285</span>
+                    <span class="text-white ml-1 font-bold">+</span>
                 </span>
             </div>
             
@@ -361,7 +363,7 @@
             return null;
         }
 
-        // 1. Fetch available domains (WITH FALLBACK)
+        // 1. Fetch available domains
         async function loadDomains() {
             try {
                 let allDomains = [];
@@ -396,7 +398,6 @@
                     }
                 }
             } catch (error) {
-                // FALLBACK TO 1SECMAIL IF MAIL.TM IS BLOCKED OR DOWN
                 console.warn("Mail.tm API failed, falling back to 1secmail...", error);
                 CURRENT_PROVIDER = '1secmail';
                 
@@ -414,12 +415,11 @@
             }
         }
 
-        // 2. Helper to Register and Login (WITH FALLBACK)
+        // 2. Helper to Register and Login
         async function registerAndLogin(address) {
-            // IF IN FALLBACK MODE, NO REGISTRATION NEEDED
             if (CURRENT_PROVIDER === '1secmail') {
                 currentEmail = address;
-                currentToken = '1secmail-token'; // Setup dummy token to indicate active provider for this session
+                currentToken = '1secmail-token';
                 consecutiveErrors = 0;
                 currentLoadedMessageData = null;
                 await saveSession(currentEmail, currentToken);
@@ -456,10 +456,8 @@
 
                 await saveSession(currentEmail, currentToken);
             } catch (error) {
-                // If it's a legitimate error like "username taken", throw it back to the UI
                 if (error.message === "Username already taken!") throw error;
                 
-                // IF NETWORK/API FAILS DURING GENERATION, HOT-SWAP TO 1SECMAIL
                 console.warn("Mail.tm registration failed, falling back to 1secmail...", error);
                 CURRENT_PROVIDER = '1secmail';
                 currentEmail = address;
@@ -566,7 +564,7 @@
             }
         }
 
-        // 6. Check Inbox (WITH FALLBACK ROUTING)
+        // 6. Check Inbox
         async function checkInbox() {
             if (!currentToken) return;
 
@@ -581,7 +579,6 @@
                     
                     const data = await res.json();
                     
-                    // Map 1secmail format to our UI format so nothing breaks visually
                     messages = data.map(msg => ({
                         id: msg.id,
                         from: { address: msg.from, name: '' },
@@ -647,7 +644,7 @@
             }
         }
 
-        // 7. Read Specific Message (WITH FALLBACK ROUTING)
+        // 7. Read Specific Message
         async function readMessage(messageId, listItemElement) {
             try {
                 document.querySelectorAll('#messageList li').forEach(el => {
@@ -682,9 +679,8 @@
                         createdAt: data.date,
                         html: data.htmlBody ? [data.htmlBody] : [],
                         text: data.textBody,
-                        // Mapped attachments perfectly for the UI format
                         attachments: (data.attachments || []).map(a => ({
-                            id: a.filename, // 1secmail expects filename for downloads
+                            id: a.filename, 
                             filename: a.filename,
                             size: a.size
                         }))
@@ -705,9 +701,9 @@
                     content = `<pre class="whitespace-pre-wrap font-sans text-sm">${msg.text}</pre>`;
                 }
 
-                // --- SMART EXTRACT LOGIC ---
+                // SMART EXTRACT LOGIC
                 let smartExtractHtml = '';
-                const plainText = msg.text || content.replace(/<[^>]+>/g, ' '); // simple strip for scanning
+                const plainText = msg.text || content.replace(/<[^>]+>/g, ' '); 
                 const otpMatch = plainText.match(/\b\d{4,8}\b/);
                 const linkMatch = plainText.match(/https?:\/\/[^\s"'<]+/);
                 
@@ -812,7 +808,7 @@
             }
         }
 
-        // NEW: Download Specific Attachment securely via API (WITH FALLBACK ROUTING)
+        // NEW: Download Specific Attachment securely via API
         async function downloadAttachment(messageId, attachmentId, filename, btnElement) {
             if (!currentToken) return;
             
@@ -880,7 +876,7 @@
             URL.revokeObjectURL(url);
         }
 
-        // 9. Delete Message (WITH FALLBACK ROUTING)
+        // 9. Delete Message
         async function deleteEmail(id) {
             if (!currentToken) return;
             
@@ -891,7 +887,6 @@
                 const is1secmail = currentToken === '1secmail-token';
 
                 if (is1secmail) {
-                    // 1secmail does not support API-level deletions, so we just simulate removal visually
                     await new Promise(r => setTimeout(r, 400)); 
                 } else {
                     await fetchWithRetry(`${API_BASE}/messages/${id}`, {
@@ -900,18 +895,14 @@
                     });
                 }
                 
-                // Immediately remove only this email from tracking
                 loadedMessages.delete(id); 
                 currentLoadedMessageData = null;
                 
-                // Optimistically remove it from the sidebar UI
                 const activeItem = document.querySelector('#messageList li.border-indigo-500');
                 if (activeItem) activeItem.remove();
 
-                // Update the counter
                 if(messageCount) messageCount.innerText = loadedMessages.size;
 
-                // Show empty state immediately if it was the last email
                 if (loadedMessages.size === 0 && messageList) {
                     messageList.innerHTML = `
                         <li class="p-8 text-center text-slate-400 flex flex-col items-center justify-center h-full">
@@ -1070,6 +1061,39 @@
             }, 2000);
         }
 
+        // NEW: Live Counter Logic
+        let currentUsers = 14285;
+        function updateLiveCounter() {
+            const counterEl = document.getElementById('liveCounter');
+            if (!counterEl) return;
+            
+            // Fluctuate by gap of 500 to 1000
+            const change = Math.floor(Math.random() * 501) + 500;
+            // Roughly 60% chance to go up, 40% chance to go down (trends upwards)
+            const isUp = Math.random() > 0.4;
+            
+            if (isUp) {
+                currentUsers += change;
+            } else {
+                currentUsers -= change;
+                // Keep it above a realistic baseline
+                if (currentUsers < 12000) currentUsers += (change * 2); 
+            }
+
+            // Quick transition effect
+            counterEl.style.opacity = '0';
+            counterEl.style.transform = 'translateY(-4px)';
+            
+            setTimeout(() => {
+                counterEl.innerText = currentUsers.toLocaleString();
+                counterEl.style.opacity = '1';
+                counterEl.style.transform = 'translateY(0)';
+            }, 150);
+
+            // Call again faster (every 1.5 to 3.5 seconds)
+            setTimeout(updateLiveCounter, Math.floor(Math.random() * 2000) + 1500);
+        }
+
         // Expose functions to window
         window.setCustomEmail = setCustomEmail;
         window.generateNewEmail = generateNewEmail;
@@ -1086,8 +1110,8 @@
         async function initializeAppFlow() {
             await loadDomains(); // Will seamlessly set the active provider and domains
             
-            // Start the fake live counter
-            setTimeout(updateLiveCounter, 1000);
+            // Start the neon live counter loop immediately
+            setTimeout(updateLiveCounter, 1500);
             
             if (isCloudStorageEnabled) {
                 if (typeof __initial_auth_token !== 'undefined') {
